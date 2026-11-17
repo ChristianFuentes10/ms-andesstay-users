@@ -1,0 +1,44 @@
+package cl.duoc.andesstay.users.config;
+
+import cl.duoc.andesstay.users.security.CognitoAudienceValidator;
+import cl.duoc.andesstay.users.security.CognitoTokenUseValidator;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+import org.springframework.security.oauth2.core.DelegatingOAuth2TokenValidator;
+import org.springframework.security.oauth2.core.OAuth2TokenValidator;
+import org.springframework.security.oauth2.jwt.Jwt;
+import org.springframework.security.oauth2.jwt.JwtDecoder;
+import org.springframework.security.oauth2.jwt.JwtDecoders;
+import org.springframework.security.oauth2.jwt.JwtValidators;
+import org.springframework.security.oauth2.jwt.NimbusJwtDecoder;
+
+/**
+ * Construye el JwtDecoder validando tokens emitidos por un User Pool de AWS Cognito
+ * (mismas validaciones que catalog, reservations, audit y BFF):
+ *   1. Issuer
+ *   2. client_id == nuestro App Client ID
+ *   3. token_use == "access"
+ *   4. Firma (JWKS) y vigencia (exp) las valida Nimbus automaticamente.
+ */
+@Configuration
+public class JwtConfig {
+
+    @Value("${spring.security.oauth2.resourceserver.jwt.issuer-uri}")
+    private String issuerUri;
+
+    @Value("${cognito.app-client-id}")
+    private String expectedClientId;
+
+    @Bean
+    public JwtDecoder jwtDecoder() {
+        NimbusJwtDecoder jwtDecoder = (NimbusJwtDecoder) JwtDecoders.fromIssuerLocation(issuerUri);
+
+        OAuth2TokenValidator<Jwt> withIssuer = JwtValidators.createDefaultWithIssuer(issuerUri);
+        OAuth2TokenValidator<Jwt> withClientId = new CognitoAudienceValidator(expectedClientId);
+        OAuth2TokenValidator<Jwt> withTokenUse = new CognitoTokenUseValidator();
+
+        jwtDecoder.setJwtValidator(new DelegatingOAuth2TokenValidator<>(withIssuer, withClientId, withTokenUse));
+        return jwtDecoder;
+    }
+}

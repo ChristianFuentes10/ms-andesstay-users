@@ -1,0 +1,38 @@
+HELP.md
+target/
+!.mvn/wrapper/maven-wrapper.jar
+!**/src/main/**/target/
+!**/src/test/**/target/
+
+### IntelliJ IDEA ###
+.idea
+*.iws
+*.iml
+*.ipr
+
+### Eclipse ###
+.apt_generated
+.classpath
+.factorypath
+.project
+.settings
+.springBeans
+.sts4-cache
+bin/
+
+### VS Code ###
+.vscode/
+
+### macOS / OS ###
+.DS_Store
+
+### Variables de entorno / credenciales locales ###
+.env
+.env.*
+!.env.example
+
+### Archivos que no deben subirse ###
+*.log
+*.jar
+application-local*.properties
+application-secret*.properties
