@@ -9,10 +9,13 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.kafka.annotation.KafkaListener;
 import org.springframework.stereotype.Component;
+import org.springframework.transaction.annotation.Transactional;
+
+import java.util.UUID;
 
 /**
  * Consumidor de eventos de Kafka para el subsistema de reporteria en tiempo real y KPI.
- * Escucha el topico configurado y persiste cada evento recibido para su consulta analitica.
+ * Escucha el topico configurado (users.events) y persiste cada evento recibido para su consulta analitica.
  */
 @Component
 public class EventConsumer {
@@ -28,15 +31,20 @@ public class EventConsumer {
     }
 
     @KafkaListener(
-            topics = "${kafka.topic.reporteria:reporteria-eventos}",
-            groupId = "${spring.kafka.consumer.group-id:ms-andesstay-users-group}"
+            topics = "${kafka.topic.reporteria:users.events}",
+            groupId = "${spring.kafka.consumer.group-id:users-events-group}"
     )
+    @Transactional
     public void consume(ConsumerRecord<String, Object> record) {
+        if (record == null || record.value() == null) {
+            return;
+        }
+
         log.info("Evento consumido desde Kafka: topic={} partition={} offset={} key={}",
                 record.topic(), record.partition(), record.offset(), record.key());
 
         try {
-            UserEvent userEvent;
+            UserEvent userEvent = null;
             Object value = record.value();
 
             if (value instanceof UserEvent ue) {
@@ -47,19 +55,28 @@ public class EventConsumer {
                 userEvent = objectMapper.convertValue(value, UserEvent.class);
             }
 
+            if (userEvent == null) {
+                log.warn("Payload de Kafka nulo o no convertible a UserEvent en topic={} offset={}",
+                        record.topic(), record.offset());
+                return;
+            }
+
             String payloadJson = objectMapper.writeValueAsString(userEvent);
+            String eventId = userEvent.getEventId() != null ? userEvent.getEventId() : UUID.randomUUID().toString();
+            String eventType = userEvent.getEventType() != null ? userEvent.getEventType() : "UNKNOWN";
+            UUID userId = userEvent.getUserId() != null ? userEvent.getUserId() : UUID.randomUUID();
+            String email = userEvent.getEmail() != null ? userEvent.getEmail() : "no-email@andesstay.cl";
 
             ReporteriaEvento entidad = new ReporteriaEvento(
-                    userEvent.getEventId(),
-                    userEvent.getEventType(),
-                    userEvent.getUserId(),
-                    userEvent.getEmail(),
+                    eventId,
+                    eventType,
+                    userId,
+                    email,
                     payloadJson
             );
 
             reporteriaEventoRepository.save(entidad);
-            log.info("Evento persistido en reporteria: tipo={} userId={}",
-                    userEvent.getEventType(), userEvent.getUserId());
+            log.info("Evento persistido en reporteria: tipo={} userId={}", eventType, userId);
 
         } catch (Exception e) {
             log.error("Error al procesar y persistir evento de reporteria de Kafka: {}", e.getMessage(), e);

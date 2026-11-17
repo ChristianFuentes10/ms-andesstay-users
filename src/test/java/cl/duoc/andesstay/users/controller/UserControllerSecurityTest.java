@@ -271,4 +271,52 @@ class UserControllerSecurityTest {
                 .andExpect(result -> org.junit.jupiter.api.Assertions.assertNotEquals(401,
                         result.getResponse().getStatus(), "/actuator/health debe ser publico"));
     }
+
+    // --- Endpoints eliminados (viven en reservations) ---
+
+    @Test
+    void kafkaAdminEndpoints_haveBeenRemovedFromUsers_return404() throws Exception {
+        mockMvc.perform(get("/api/admin/kafka/topics").with(as("ADMIN")))
+                .andExpect(status().isNotFound());
+    }
+
+    @Test
+    void reporteriaEndpoints_haveBeenRemovedFromUsers_return404() throws Exception {
+        mockMvc.perform(get("/api/reporteria/kpi").with(as("ADMIN")))
+                .andExpect(status().isNotFound());
+    }
+
+    // --- Flujo completo de registro: token autenticado -> POST /api/users -> GET /api/users/me ---
+
+    @Test
+    void fullRegistrationFlow_postUsersWithToken_createsHuesped_thenGetMeReturns200() throws Exception {
+        String sub = "cognito-new-user-sub-123";
+        UUID newUserId = UUID.randomUUID();
+        UserResponse createdResponse = new UserResponse(
+                newUserId, "nuevo@test.com", "Nuevo", "Huesped", "+56912345678",
+                "ACTIVO", Set.of(Role.HUESPED), Instant.now(), Instant.now()
+        );
+
+        when(userService.register(any(), eq(new cl.duoc.andesstay.users.service.CurrentUser(sub, false))))
+                .thenReturn(createdResponse);
+        when(userService.me(sub)).thenReturn(createdResponse);
+
+        // Paso 1: Post-login en Cognito, la aplicacion invoca POST /api/users con el token para registrar perfil local
+        mockMvc.perform(post("/api/users")
+                        .with(jwt().jwt(j -> j.subject(sub)).authorities(new SimpleGrantedAuthority("ROLE_HUESPED")))
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"nombre\":\"Nuevo\",\"apellido\":\"Huesped\",\"email\":\"nuevo@test.com\",\"telefono\":\"+56912345678\"}"))
+                .andExpect(status().isCreated())
+                .andExpect(jsonPath("$.id").value(newUserId.toString()))
+                .andExpect(jsonPath("$.email").value("nuevo@test.com"))
+                .andExpect(jsonPath("$.roles[0]").value("HUESPED"));
+
+        // Paso 2: La aplicacion consulta su perfil con GET /api/users/me usando el mismo token
+        mockMvc.perform(get("/api/users/me")
+                        .with(jwt().jwt(j -> j.subject(sub)).authorities(new SimpleGrantedAuthority("ROLE_HUESPED"))))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.id").value(newUserId.toString()))
+                .andExpect(jsonPath("$.email").value("nuevo@test.com"))
+                .andExpect(jsonPath("$.roles[0]").value("HUESPED"));
+    }
 }
