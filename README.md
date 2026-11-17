@@ -2,130 +2,191 @@
 
 Microservicio de dominio del caso **AndesStay** (DSY1107 - Desarrollo Cloud Native I, Duoc UC).
 
-Responsable del dominio **Usuarios**: registro, perfil, **roles** y baja de usuarios. Las credenciales las administra **AWS Cognito**; este servicio guarda el perfil de negocio y mantiene los roles sincronizados con los **grupos de Cognito**.
+Responsable del dominio **Usuarios**: registro, perfil, **roles** y baja lógica de usuarios. Las credenciales las administra **AWS Cognito**; este servicio almacena el perfil de negocio, emite eventos de ciclo de vida de usuario a Apache Kafka y mantiene los roles sincronizados con los **grupos de Cognito**.
 
 ---
 
-## Stack
+## Stack Tecnológico
 
-- **Java 17** · **Spring Boot 3.3.4** (Web, Data JPA, Validation, Security, Actuator)
-- **Spring Security OAuth2 Resource Server** (JWT - AWS Cognito)
-- **AWS SDK v2** (`cognitoidentityprovider`) para altas y sincronización de grupos (opcional)
+- **Java 17** · **Spring Boot 3.3.4** (Web, Data JPA, Validation, Security, Actuator, Kafka)
+- **Spring Security OAuth2 Resource Server** (JWT - AWS Cognito User Pool `us-east-1_l3aNhIuac`)
+- **Apache Kafka** (integración a clúster compartido de 2 brokers, tópico `users.events`)
+- **AWS SDK v2** (`cognitoidentityprovider`) para sincronización de grupos y administración (opcional)
 - **PostgreSQL 16** · **Docker Compose** · **Maven 3.9+** · **springdoc-openapi** (Swagger)
 
-Mismas convenciones que `ms-andesstay-catalog` / `ms-andesstay-reservations`: paquete `cl.duoc.andesstay.users`, capas `controller → service → repository`, DTOs de salida, `ErrorResponse` común, `TraceIdFilter` (`X-Trace-Id`), misma validación de tokens (issuer + `client_id` + `token_use=access`).
+Convenciones compartidas con `ms-andesstay-catalog` y `ms-andesstay-reservations`:
+- Paquete base `cl.duoc.andesstay.users`.
+- Capas: `controller → service → repository`, `model`, `dto`, `security`, `config`, `consumer`, `producer`, `idp`.
+- `ErrorResponse` estandarizado: `{ "timestamp", "status", "error", "message", "path" }`.
+- `TraceIdFilter` (`X-Trace-Id` en cabeceras y MDC de logging).
+- Validación de token JWT con 3 validadores: issuer uri, `client_id` (`andesstay-web`) y `token_use=access`.
 
 ---
 
-## Arquitectura
+## Arquitectura y Red
 
 ```
-Angular ──(Cognito Hosted UI, PKCE)──► token
-   │
-   ▼
- BFF :8080  ──(Bearer propagado)──►  ms-andesstay-users :8085 ──► PostgreSQL (andesstay_users)
-                                              │
-                                              └─(opcional, AWS SDK)──► Cognito User Pool (usuarios + grupos)
+                     ┌────────────────────────────────────────┐
+                     │          AWS Cognito User Pool         │
+                     │ (us-east-1_l3aNhIuac / andesstay-web)  │
+                     └──────────────────┬─────────────────────┘
+                                        │ JWT Access Token
+                                        ▼
+Cliente / Angular ──────────► ms-andesstay-bff (:8080)
+                                        │ Bearer Token propagado
+                                        ▼
+                             ms-andesstay-users (:8085)
+                                  │                │
+            JDBC (:5432)          │                │ Producer (users.events)
+                                  ▼                ▼
+                     PostgreSQL (host :5435)   Kafka Cluster (2 brokers)
+                     (DB: andesstay_users)     (kafka-1:29092, kafka-2:29093)
+                                               [Red Docker: andesstay-net]
 ```
 
-Capas: `config/` · `controller/` · `service/` · `repository/` · `model/` · `dto/` · `exception/` · `security/` · `idp/` (puerto `IdentityProviderClient` con implementación Cognito y no-op).
-
-### Roles
-
-| Rol | Descripción |
-|-----|-------------|
-| `HUESPED` | Cliente. Rol por defecto de todo auto-registro |
-| `RECEPCIONISTA` | Gestiona reservas |
-| `ADMIN` | Administra usuarios, roles, catálogo y reportes |
-| `AUDITOR` | Consulta auditoría |
-
-El nombre del rol **es** el nombre del grupo de Cognito (`cognito:groups` → `ROLE_<NOMBRE>`), por lo que BFF, catalog, reservations y audit los entienden sin cambios.
+### Separación de Tópicos Kafka (Entrega 3)
+- **`users.events`**: Tópico dedicado para eventos del ciclo de vida de usuarios (`UserEvent`: `USER_REGISTERED`, `USER_UPDATED`, `USER_ROLE_CHANGED`, `USER_DEACTIVATED`).
+  - **Factor de replicación**: Configurable vía variable de entorno (`KAFKA_TOPIC_REPLICATION_FACTOR=2` en local y AWS).
+  - **Consumer Group**: `users-events-group` (independiente).
+  - **Aislamiento**: `UserEvent` **no** se publica en `reporteria-eventos`. De esta forma, el consumidor de `ms-andesstay-reservations` (que espera el esquema `ReportEventMessage`) no sufre fallos de deserialización y ningún evento de users es desviado a `reporteria-eventos.DLT`.
+- **Endpoints de Reportería y Kafka Admin**: Centralizados exclusivamente en `ms-andesstay-reservations` (`/api/admin/kafka/**` y `/api/reportes/**`), que es desde donde lee Grafana y los dashboards KPI.
 
 ---
 
-## API (`/api/users`)
+## Flujo de Registro y Autenticación
 
-| Método | Ruta | Acceso | Descripción |
-|--------|------|--------|-------------|
-| `POST` | `/api/users` | Autenticado | Registro. **Auto-registro** (no ADMIN): perfil ligado al `sub` del token, rol `HUESPED` forzado. **Alta por ADMIN**: puede indicar `roles` y `password` temporal |
-| `GET` | `/api/users/me` | Autenticado | Perfil propio (404 si aún no se registró) |
-| `GET` | `/api/users` | ADMIN | Lista. Filtros: `rol`, `estado`, `q`, `page`, `size`. Total en header `X-Total-Count` |
-| `GET` | `/api/users/{id}` | ADMIN o dueño | Detalle (UUID) |
-| `PUT` | `/api/users/{id}` | ADMIN o dueño | Actualiza perfil. `roles` y `estado` solo los aplica un ADMIN (si no, 403) |
-| `DELETE` | `/api/users/{id}` | ADMIN | **Baja lógica** (`INACTIVO`) y deshabilita login en Cognito. 204 |
+El alta de usuarios y su vinculación con el microservicio sigue el siguiente flujo de 5 pasos:
 
-### API Kafka Admin (`/api/admin/kafka/topics`) - *Requerimiento Rúbrica Entrega 3*
-| Método | Ruta | Acceso | Descripción |
-|--------|------|--------|-------------|
-| `GET` | `/api/admin/kafka/topics` | ADMIN | Lista todos los tópicos y número de particiones |
-| `GET` | `/api/admin/kafka/topics/{name}` | ADMIN | Detalle del tópico, particiones, réplicas y configuraciones activas |
-| `POST` | `/api/admin/kafka/topics` | ADMIN | **Creación** de tópico (nombre, particiones, réplicas, configs) |
-| `PUT` | `/api/admin/kafka/topics/{name}` | ADMIN | **Modificación** de tópico (aumento de particiones y actualización de configs) |
-| `DELETE` | `/api/admin/kafka/topics/{name}` | ADMIN | **Eliminación** de tópico en Kafka |
+```mermaid
+sequenceDiagram
+    autonumber
+    actor U as Usuario
+    participant C as AWS Cognito
+    participant B as BFF (:8080)
+    participant S as ms-andesstay-users (:8085)
+    participant K as Kafka (users.events)
 
-### API Reportería y KPI en tiempo real (`/api/reporteria`) - *Requerimiento Rúbrica Entrega 3*
-| Método | Ruta | Acceso | Descripción |
-|--------|------|--------|-------------|
-| `GET` | `/api/reporteria/kpi` | ADMIN | KPIs consolidados: total usuarios, activos/inactivos, por rol y métricas de eventos Kafka |
-| `GET` | `/api/reporteria/eventos` | ADMIN | Traza de auditoría de los últimos eventos procesados por el consumidor Kafka |
-
-Registro (cuerpo):
-```json
-{ "nombre": "Juan", "apellido": "Pérez", "email": "juan@test.com", "telefono": "+56 9 1234 5678", "password": "12345678", "roles": ["RECEPCIONISTA"] }
+    U->>C: 1. SignUp (email + password)
+    C-->>U: Código de verificación por correo
+    U->>C: 2. Confirm SignUp con código
+    U->>C: 3. Login (PKCE / USER_PASSWORD_AUTH)
+    C-->>U: Access Token JWT (sub, client_id, token_use=access)
+    U->>B: 4. POST /api/users (Bearer Token + perfil)
+    B->>S: POST /api/users (Bearer Token propagado)
+    Note over S: Fuerza rol HUESPED ligado al 'sub'<br/>(ignora intento de escalada de roles)
+    S->>K: Emite UserEvent(USER_REGISTERED) a 'users.events'
+    S-->>B: 201 Created (UserResponse con rol HUESPED)
+    B-->>U: 201 Created
+    U->>B: 5. GET /api/users/me (Bearer Token)
+    B->>S: GET /api/users/me (Bearer Token)
+    S-->>B: 200 OK (Perfil del usuario autenticado)
+    B-->>U: 200 OK
 ```
 
-### Reglas de negocio
-- Un auto-registro nunca puede elegir roles (evita escalada de privilegios).
-- Email único (sin distinguir mayúsculas) y un perfil por `sub`.
-- Con Cognito habilitado, el email de un auto-registro debe coincidir con el verificado en Cognito.
-- Nunca se deja el sistema sin un ADMIN activo; un ADMIN no puede quitarse el rol, desactivarse ni eliminarse a sí mismo (409).
-- Un perfil pre-creado por un ADMIN se vincula al `sub` en el primer `GET /api/users/me`.
-
-### Errores
-Mismo formato que reservations/BFF: `{ "timestamp", "status", "error", "message", "path" }`.
-`400` validación · `401` sin token · `403` sin permiso · `404` no existe · `409` duplicado/regla de negocio · `502` falla Cognito.
+> [!NOTE]
+> **Alineación con el BFF**: En versiones preliminares, el Javadoc de `UsersProxyController` en el BFF indicaba erróneamente que `POST /api/users` era un endpoint público. En realidad, el endpoint está protegido (`authenticated`) tanto en el `SecurityConfig` del BFF como en `ms-andesstay-users`: el usuario debe autenticarse primero en Cognito y enviar el Bearer token para registrar su perfil local vinculado al `sub`.
 
 ---
 
-## Variables de entorno
+## Matriz de Roles y API REST
 
-| Variable | Descripción | Default |
-|----------|-------------|---------|
-| `DB_URL` / `DB_USERNAME` / `DB_PASSWORD` | PostgreSQL | `jdbc:postgresql://localhost:5432/andesstay_users` / `postgres` / `postgres` |
-| `COGNITO_REGION` / `COGNITO_USER_POOL_ID` / `COGNITO_APP_CLIENT_ID` | Mismo User Pool que el resto | `us-east-1` / `CHANGE_ME` / `CHANGE_ME` |
-| `COGNITO_ADMIN_ENABLED` | `true` = crea usuarios y sincroniza grupos en Cognito | `false` |
-| `USERS_BOOTSTRAP_ADMIN_EMAIL` | Crea el perfil del primer ADMIN (idempotente) | vacío |
-| `DEFAULT_ROLE` | Rol para tokens sin grupos | `HUESPED` |
-| `KAFKA_BOOTSTRAP_SERVERS` | Servidor Kafka | `localhost:9092` (en docker `kafka:29092`) |
-| `KAFKA_TOPIC_REPORTERIA` | Tópico para eventos de reportería | `reporteria-eventos` |
-| `FRONTEND_URL` / `CORS_ENABLED` | CORS (Angular) | `http://localhost:4200` / `true` |
-| `SERVER_PORT` | Puerto | `8085` (el que espera el BFF: `USERS_SERVICE_URL`) |
+### Roles de Usuario
+| Rol | Grupo Cognito | Descripción |
+|---|---|---|
+| `HUESPED` | `HUESPED` | Cliente final del sistema. Rol asignado por defecto en auto-registro |
+| `RECEPCIONISTA` | `RECEPCIONISTA` | Personal administrativo de atención y reservas |
+| `ADMIN` | `ADMIN` | Administrador total del sistema (catálogo, reservas, usuarios) |
+| `AUDITOR` | `AUDITOR` | Consulta trazas y eventos de auditoría |
+
+### Endpoints (`/api/users`)
+
+| Método | Ruta | Acceso requerido | Descripción y Reglas de Negocio |
+|---|---|---|---|
+| `POST` | `/api/users` | Autenticado | **Auto-registro**: Asigna forzosamente rol `HUESPED` y liga al `sub` del token (ignora `roles`/`password` del body).<br/>**Alta por ADMIN**: Permite crear usuarios con roles específicos y contraseña temporal. Retorna `201`. Si email o sub ya existen retorna `409`. |
+| `GET` | `/api/users/me` | Autenticado | Retorna el perfil del usuario autenticado según su `sub`. `404` si aún no registra perfil. Si fue pre-creado por un ADMIN, vincula el `sub` automáticamente. |
+| `GET` | `/api/users` | Solo `ADMIN` | Listado paginado de usuarios. Parámetros opcionales: `rol`, `estado`, `q`, `page` (def 0), `size` (def 50, máx 200). Retorna total en cabecera `X-Total-Count`. |
+| `GET` | `/api/users/{id}` | `ADMIN` o Dueño | Consulta de detalle por UUID de usuario. |
+| `PUT` | `/api/users/{id}` | `ADMIN` o Dueño | Actualización de perfil (nombre, apellido, teléfono). `roles` y `estado` solo pueden ser alterados por un `ADMIN` (si no, `403`). |
+| `DELETE` | `/api/users/{id}` | Solo `ADMIN` | **Baja lógica** (`INACTIVO`) y deshabilitación en Cognito. Idempotente (`204`). Un ADMIN no puede eliminarse a sí mismo ni dejar al sistema sin ningún ADMIN activo (`409`). |
 
 ---
 
-## Ejecución local con Docker Desktop (Entrega 3 Completa)
+## Variables de Entorno
 
+| Variable | Descripción | Valor por defecto / Ejemplo |
+|---|---|---|
+| `SERVER_PORT` | Puerto HTTP del servicio | `8085` |
+| `DB_URL` | URL de conexión PostgreSQL | `jdbc:postgresql://localhost:5432/andesstay_users` (o `postgres:5432` en docker) |
+| `DB_USERNAME` | Usuario de PostgreSQL | `postgres` |
+| `DB_PASSWORD` | Contraseña de PostgreSQL | `postgres` |
+| `COGNITO_REGION` | Región AWS del User Pool | `us-east-1` |
+| `COGNITO_USER_POOL_ID` | Identificador del User Pool | `us-east-1_l3aNhIuac` |
+| `COGNITO_APP_CLIENT_ID` | Client ID de la aplicación | `andesstay-web` |
+| `COGNITO_ADMIN_ENABLED` | Integración administrativa Cognito (`false` = auto-registro local) | `false` |
+| `DEFAULT_ROLE` | Rol asignado cuando el token no tiene grupos | `HUESPED` |
+| `KAFKA_BOOTSTRAP_SERVERS` | Direcciones de los brokers Kafka | `kafka-1:29092,kafka-2:29093` (docker) / `localhost:9092,localhost:9093` (host) |
+| `KAFKA_TOPIC_REPORTERIA` | Nombre del tópico para eventos de usuario | `users.events` |
+| `KAFKA_CONSUMER_GROUP_ID` | Group ID del consumidor de eventos | `users-events-group` |
+| `KAFKA_TOPIC_REPLICATION_FACTOR` | Factor de replicación del tópico | `2` (local y AWS) |
+| `KAFKA_TOPIC_PARTITIONS` | Cantidad de particiones del tópico | `3` |
+| `FRONTEND_URL` | Origen permitido para CORS (Angular) | `http://localhost:4200` |
+| `CORS_ENABLED` | Habilitación de configuración CORS | `true` |
+
+> [!IMPORTANT]
+> **Modo Cognito Admin**: En entornos como **AWS Academy**, el rol de laboratorio no dispone de permisos `cognito-idp:Admin*`. Por ello, `COGNITO_ADMIN_ENABLED=false` viene configurado por defecto, permitiendo que el flujo opere de forma transparente mediante auto-registro y validación estándar de JWTs.
+
+---
+
+## Ejecución Local y Pruebas
+
+### 1. Prerrequisito: Red externa compartida
+Asegurar que la red Docker compartida exista:
+```bash
+docker network create andesstay-net
+```
+
+### 2. Infraestructura Kafka Compartida (2 brokers)
+Desde `ms-andesstay-reservations/infra/kafka`:
+```bash
+docker compose up -d
+```
+Esto levanta Zookeeper, `kafka-1` (:9092 en host, :29092 en red) y `kafka-2` (:9093 en host, :29093 en red).
+
+### 3. Levantar ms-andesstay-users
 ```bash
 docker compose up -d --build
 ```
+Servicios que levanta `ms-andesstay-users`:
+- **`andesstay-users-db`**: PostgreSQL 16 expuesto en el puerto host `5435:5432` (evita conflicto con catálogo 5432 y reservaciones 5433).
+- **`ms-andesstay-users`**: Aplicación Spring Boot en el puerto `8085:8085`, conectada a `andesstay-net`.
 
-Servicios desplegados y puertos expuestos:
-- **API Usuarios & Kafka Admin**: `http://localhost:8085` (Swagger: `/swagger-ui.html`)
-- **PostgreSQL**: `localhost:5435`
-- **Apache Kafka Broker**: `localhost:9092`
-- **Zookeeper**: `localhost:2181`
-- **Kafka-UI (Consola Web de Kafka)**: `http://localhost:8086` (ver y administrar tópicos, mensajes y brokers)
-- **Prometheus**: `http://localhost:9090` (recolecta `/actuator/prometheus`)
-- **Grafana**: `http://localhost:3000` (permite embeber dashboards con iframe en Angular)
+### 4. Verificación de Health y Endpoints
 
-### Tests
 ```bash
-mvn test
+# 1. Healthcheck público
+curl -i http://localhost:8085/actuator/health
+# Esperado: 200 OK, {"status":"UP"}
+
+# 2. Intento sin token a ruta protegida
+curl -i http://localhost:8085/api/users/me
+# Esperado: 401 Unauthorized
+
+# 3. Consulta con token Cognito válido
+curl -i -H "Authorization: Bearer <TOKEN_VALIDO>" http://localhost:8085/api/users/me
+# Esperado: 200 OK con el perfil del usuario
+
+# 4. Verificar que no existe tráfico erróneo en DLT
+# En el cluster Kafka compartido, reporteria-eventos.DLT permanece limpio sin mensajes de users.
 ```
-Tests unitarios y de integración de seguridad: `UserServiceTest`, `UserControllerSecurityTest`, `KafkaAdminControllerTest`, `ReporteriaControllerTest`, `CognitoSecurityComponentsTest`, `UserRepositoryTest`.
 
----
-
-## Integración con el resto del sistema
-- **BFF**: ya tiene `UsersClient`/`UsersProxyController` y espera este servicio en `USERS_SERVICE_URL=http://localhost:8085`.
-- **Apache Kafka**: Publica eventos (`USER_REGISTERED`, `USER_UPDATED`, `USER_ROLE_CHANGED`, `USER_DEACTIVATED`) en el tópico `reporteria-eventos` con la clave del usuario (partición por ID) y el consumidor actualiza las tablas de reportería en PostgreSQL para alimentar los tableros analíticos.
+### 5. Ejecución de Tests
+```bash
+mvn clean test
+```
+Ejecuta la suite completa de 68 tests automatizados:
+- `UserControllerSecurityTest`: Matriz de seguridad, 401 sin token, 403 por rol, 404 en rutas eliminadas y flujo integral de registro.
+- `UserServiceTest`: Reglas de negocio (rol HUESPED forzado en auto-registro, protección del último ADMIN, compensación transaccional).
+- `UserRepositoryTest`: Unicidad insensible a mayúsculas en PostgreSQL/H2 y consultas paginadas.
+- `EventProducerTest`: Emisión de eventos al tópico `users.events` particionado por ID.
+- `EventConsumerTest`: Deserialización y persistencia resiliente de eventos.
+- `CognitoSecurityComponentsTest`: Validadores de audiencia, token_use e issuer.

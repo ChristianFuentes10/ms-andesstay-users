@@ -1,7 +1,7 @@
 package cl.duoc.andesstay.users.config;
 
-import org.apache.kafka.clients.admin.AdminClient;
 import org.apache.kafka.clients.admin.AdminClientConfig;
+import org.apache.kafka.clients.admin.NewTopic;
 import org.apache.kafka.clients.consumer.ConsumerConfig;
 import org.apache.kafka.clients.producer.ProducerConfig;
 import org.apache.kafka.common.serialization.StringDeserializer;
@@ -11,9 +11,11 @@ import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.kafka.annotation.EnableKafka;
 import org.springframework.kafka.config.ConcurrentKafkaListenerContainerFactory;
+import org.springframework.kafka.config.TopicBuilder;
 import org.springframework.kafka.core.ConsumerFactory;
 import org.springframework.kafka.core.DefaultKafkaConsumerFactory;
 import org.springframework.kafka.core.DefaultKafkaProducerFactory;
+import org.springframework.kafka.core.KafkaAdmin;
 import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.kafka.core.ProducerFactory;
 import org.springframework.kafka.support.serializer.ErrorHandlingDeserializer;
@@ -24,27 +26,46 @@ import java.util.HashMap;
 import java.util.Map;
 
 /**
- * Configuracion centralizada de Apache Kafka:
- *  - ProducerFactory y KafkaTemplate para envio asincrono de eventos.
- *  - ConsumerFactory y ConcurrentKafkaListenerContainerFactory para deserializacion resiliente.
- *  - AdminClient para gestion programatica de topicos (creacion, alteracion, borrado).
+ * Configuracion centralizada de Apache Kafka para ms-andesstay-users:
+ *  - Conecta a los brokers compartidos de AndesStay.
+ *  - ProducerFactory y KafkaTemplate para publicacion de eventos en users.events.
+ *  - ConsumerFactory y ConcurrentKafkaListenerContainerFactory para deserializacion de eventos.
+ *  - Creacion automatica del topico users.events con factor de replicacion configurable.
  */
 @Configuration
 @EnableKafka
 public class KafkaConfig {
 
-    @Value("${spring.kafka.bootstrap-servers:localhost:9092}")
+    @Value("${spring.kafka.bootstrap-servers:localhost:9092,localhost:9093}")
     private String bootstrapServers;
 
-    @Value("${spring.kafka.consumer.group-id:ms-andesstay-users-group}")
+    @Value("${spring.kafka.consumer.group-id:users-events-group}")
     private String defaultGroupId;
 
+    @Value("${kafka.topic.reporteria:users.events}")
+    private String usersEventsTopic;
+
+    @Value("${kafka.topic.partitions:3}")
+    private int partitions;
+
+    @Value("${kafka.topic.replication-factor:2}")
+    private short replicationFactor;
+
     @Bean
-    public AdminClient kafkaAdminClient() {
+    public KafkaAdmin kafkaAdmin() {
         Map<String, Object> configs = new HashMap<>();
         configs.put(AdminClientConfig.BOOTSTRAP_SERVERS_CONFIG, bootstrapServers);
-        configs.put(AdminClientConfig.REQUEST_TIMEOUT_MS_CONFIG, 5000);
-        return AdminClient.create(configs);
+        KafkaAdmin admin = new KafkaAdmin(configs);
+        admin.setFatalIfBrokerNotAvailable(false);
+        return admin;
+    }
+
+    @Bean
+    public NewTopic usersEventsTopic() {
+        return TopicBuilder.name(usersEventsTopic)
+                .partitions(partitions)
+                .replicas(replicationFactor)
+                .build();
     }
 
     @Bean
@@ -60,8 +81,8 @@ public class KafkaConfig {
     }
 
     @Bean
-    public KafkaTemplate<String, Object> kafkaTemplate(ProducerFactory<String, Object> producerFactory) {
-        return new KafkaTemplate<>(producerFactory);
+    public KafkaTemplate<String, Object> kafkaTemplate() {
+        return new KafkaTemplate<>(producerFactory());
     }
 
     @Bean
@@ -78,11 +99,10 @@ public class KafkaConfig {
     }
 
     @Bean
-    public ConcurrentKafkaListenerContainerFactory<String, Object> kafkaListenerContainerFactory(
-            ConsumerFactory<String, Object> consumerFactory) {
+    public ConcurrentKafkaListenerContainerFactory<String, Object> kafkaListenerContainerFactory() {
         ConcurrentKafkaListenerContainerFactory<String, Object> factory =
                 new ConcurrentKafkaListenerContainerFactory<>();
-        factory.setConsumerFactory(consumerFactory);
+        factory.setConsumerFactory(consumerFactory());
         return factory;
     }
 }

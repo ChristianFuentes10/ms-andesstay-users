@@ -24,7 +24,7 @@ public class EventProducer {
     private final String reporteriaTopic;
 
     public EventProducer(@org.springframework.beans.factory.annotation.Autowired(required = false) KafkaTemplate<String, Object> kafkaTemplate,
-                         @Value("${kafka.topic.reporteria:reporteria-eventos}") String reporteriaTopic) {
+                         @Value("${kafka.topic.reporteria:users.events}") String reporteriaTopic) {
         this.kafkaTemplate = kafkaTemplate;
         this.reporteriaTopic = reporteriaTopic;
     }
