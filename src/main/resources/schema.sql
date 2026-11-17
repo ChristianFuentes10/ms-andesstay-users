@@ -26,18 +26,3 @@ CREATE TABLE IF NOT EXISTS user_roles (
 );
 
 CREATE INDEX IF NOT EXISTS ix_user_roles_role ON user_roles (role);
-
--- Tabla de reporteria y metricas en tiempo real procesadas desde Kafka
-CREATE TABLE IF NOT EXISTS reporteria_eventos (
-    id          UUID            PRIMARY KEY,
-    event_id    VARCHAR(100)    NOT NULL,
-    event_type  VARCHAR(50)     NOT NULL,
-    user_id     UUID            NOT NULL,
-    email       VARCHAR(254)    NOT NULL,
-    payload     TEXT,
-    created_at  TIMESTAMPTZ     NOT NULL DEFAULT NOW()
-);
-
-CREATE INDEX IF NOT EXISTS ix_reporteria_eventos_user_id ON reporteria_eventos (user_id);
-CREATE INDEX IF NOT EXISTS ix_reporteria_eventos_type ON reporteria_eventos (event_type);
-CREATE INDEX IF NOT EXISTS ix_reporteria_eventos_created_at ON reporteria_eventos (created_at DESC);

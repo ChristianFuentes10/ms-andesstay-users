@@ -32,7 +32,15 @@ public class UserController {
         this.userService = userService;
     }
 
-    /** Registro (auto-registro o alta por ADMIN). */
+    /**
+     * Registro de usuario (Flujo autenticado):
+     *  1. El cliente se registra (SignUp) en AWS Cognito y confirma el codigo enviado a su correo.
+     *  2. Inicia sesion en Cognito y obtiene su Access Token (JWT con claim 'sub').
+     *  3. Envia POST /api/users con el token en el header Authorization: Bearer.
+     *  4. El microservicio crea el perfil en PostgreSQL vinculado a dicho 'sub', asignando
+     *     por defecto el rol HUESPED (auto-registro seguro sin escalada de privilegios).
+     *     Si quien invoca tiene rol ADMIN, puede crear perfiles con roles personalizados.
+     */
     @PostMapping
     @ResponseStatus(HttpStatus.CREATED)
     public UserResponse register(@Valid @RequestBody RegisterUserRequest request, Authentication authentication) {

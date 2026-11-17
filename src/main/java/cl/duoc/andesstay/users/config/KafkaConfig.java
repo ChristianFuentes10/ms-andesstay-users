@@ -1,7 +1,6 @@
 package cl.duoc.andesstay.users.config;
 
-import org.apache.kafka.clients.admin.AdminClient;
-import org.apache.kafka.clients.admin.AdminClientConfig;
+import org.apache.kafka.clients.admin.NewTopic;
 import org.apache.kafka.clients.consumer.ConsumerConfig;
 import org.apache.kafka.clients.producer.ProducerConfig;
 import org.apache.kafka.common.serialization.StringDeserializer;
@@ -11,6 +10,7 @@ import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.kafka.annotation.EnableKafka;
 import org.springframework.kafka.config.ConcurrentKafkaListenerContainerFactory;
+import org.springframework.kafka.config.TopicBuilder;
 import org.springframework.kafka.core.ConsumerFactory;
 import org.springframework.kafka.core.DefaultKafkaConsumerFactory;
 import org.springframework.kafka.core.DefaultKafkaProducerFactory;
@@ -24,10 +24,10 @@ import java.util.HashMap;
 import java.util.Map;
 
 /**
- * Configuracion centralizada de Apache Kafka:
- *  - ProducerFactory y KafkaTemplate para envio asincrono de eventos.
+ * Configuracion centralizada de Apache Kafka para ms-andesstay-users:
+ *  - ProducerFactory y KafkaTemplate para envio asincrono de eventos al topico 'users.events'.
  *  - ConsumerFactory y ConcurrentKafkaListenerContainerFactory para deserializacion resiliente.
- *  - AdminClient para gestion programatica de topicos (creacion, alteracion, borrado).
+ *  - Definicion declarativa de NewTopic con factor de replicacion configurable (default 2 en local/AWS).
  */
 @Configuration
 @EnableKafka
@@ -36,15 +36,24 @@ public class KafkaConfig {
     @Value("${spring.kafka.bootstrap-servers:localhost:9092}")
     private String bootstrapServers;
 
-    @Value("${spring.kafka.consumer.group-id:ms-andesstay-users-group}")
+    @Value("${spring.kafka.consumer.group-id:ms-andesstay-users-events-group}")
     private String defaultGroupId;
 
+    @Value("${kafka.topic.users-events:users.events}")
+    private String usersEventsTopic;
+
+    @Value("${kafka.topic.partitions:3}")
+    private int partitions;
+
+    @Value("${kafka.topic.replication-factor:2}")
+    private short replicationFactor;
+
     @Bean
-    public AdminClient kafkaAdminClient() {
-        Map<String, Object> configs = new HashMap<>();
-        configs.put(AdminClientConfig.BOOTSTRAP_SERVERS_CONFIG, bootstrapServers);
-        configs.put(AdminClientConfig.REQUEST_TIMEOUT_MS_CONFIG, 5000);
-        return AdminClient.create(configs);
+    public NewTopic usersEventsTopicDefinition() {
+        return TopicBuilder.name(usersEventsTopic)
+                .partitions(partitions)
+                .replicas(replicationFactor)
+                .build();
     }
 
     @Bean
