@@ -15,6 +15,7 @@ import cl.duoc.andesstay.users.repository.UserRepository;
 import cl.duoc.andesstay.users.repository.UserSpecifications;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.data.domain.Sort;
@@ -54,6 +55,7 @@ public class UserService {
         this(userRepository, identityProvider, null);
     }
 
+    @Autowired
     public UserService(UserRepository userRepository,
                        IdentityProviderClient identityProvider,
                        EventProducer eventProducer) {
